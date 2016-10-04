@@ -103,56 +103,84 @@ defmodule Ueberauth.Strategy.Slack do
   def credentials(conn) do
     token = conn.private.slack_token
     auth = conn.private.slack_auth
-    user = conn.private.slack_user
 
     scopes = (token.other_params["scope"] || "")
-    |> String.split(",")
+             |> String.split(",")
 
-    %Credentials{
-      token: token.access_token,
-      refresh_token: token.refresh_token,
-      expires_at: token.expires_at,
-      token_type: token.token_type,
-      expires: !!token.expires_at,
-      scopes: scopes,
-      other: %{
-        user: auth["user"],
-        user_id: auth["user_id"],
-        team: auth["team"],
-        team_id: auth["team_id"],
-        team_url: auth["url"],
-        has_2fa: user["has_2fa"],
-        is_admin: user["is_admin"],
-        is_owner: user["is_owner"],
-        is_primary_owner: user["is_primary_owner"],
-        is_restricted: user["is_restricted"],
-        is_ultra_restricted: user["is_ultra_restricted"],
-      }
-    }
+    case "users:read" in scopes do
+      false ->
+        %Credentials{
+          token: token.access_token,
+          refresh_token: token.refresh_token,
+          expires_at: token.expires_at,
+          token_type: token.token_type,
+          expires: !!token.expires_at,
+          scopes: scopes,
+          other: %{
+            user: auth["user"],
+            user_id: auth["user_id"],
+            team: auth["team"],
+            team_id: auth["team_id"],
+            team_url: auth["url"]
+          }
+        }
+      true ->
+        user = conn.private.slack_user
+        %Credentials{
+          token: token.access_token,
+          refresh_token: token.refresh_token,
+          expires_at: token.expires_at,
+          token_type: token.token_type,
+          expires: !!token.expires_at,
+          scopes: scopes,
+          other: %{
+            user: auth["user"],
+            user_id: auth["user_id"],
+            team: auth["team"],
+            team_id: auth["team_id"],
+            team_url: auth["url"],
+            has_2fa: user["has_2fa"],
+            is_admin: user["is_admin"],
+            is_owner: user["is_owner"],
+            is_primary_owner: user["is_primary_owner"],
+            is_restricted: user["is_restricted"],
+            is_ultra_restricted: user["is_ultra_restricted"],
+          }
+        }
+    end
   end
 
   @doc false
   def info(conn) do
-    user = conn.private.slack_user
-    auth = conn.private.slack_auth
-    image_urls = user["profile"]
-    |> Map.keys
-    |> Enum.filter(&(&1 =~ ~r/^image_/))
-    |> Enum.map(&({ &1, user["profile"][&1] }))
-    |> Enum.into(%{})
+    token = conn.private.slack_token
+    scopes = (token.other_params["scope"] || "")
+             |> String.split(",")
 
-    %Info{
-      name: name_from_user(user),
-      nickname: user["name"],
-      email: user["profile"]["email"],
-      image: user["profile"]["image_48"],
-      urls: Map.merge(
-        image_urls,
-        %{
-          team_url: auth["url"],
+    case "users:read" in scopes do
+      false ->
+        # TODO: Pull out user from auth
+        %Info{}
+      true  ->
+        user = conn.private.slack_user
+        auth = conn.private.slack_auth
+        image_urls = user["profile"]
+                     |> Map.keys
+                     |> Enum.filter(&(&1 =~ ~r/^image_/))
+                     |> Enum.map(&({ &1, user["profile"][&1] }))
+                     |> Enum.into(%{})
+
+        %Info{
+          name: name_from_user(user),
+          nickname: user["name"],
+          email: user["profile"]["email"],
+          image: user["profile"]["image_48"],
+          urls: Map.merge(
+          image_urls,
+          %{
+            team_url: auth["url"],
+          })
         }
-      )
-    }
+    end
   end
 
   @doc false
@@ -161,8 +189,8 @@ defmodule Ueberauth.Strategy.Slack do
       raw_info: %{
         auth: conn.private.slack_auth,
         token: conn.private.slack_token,
-        user: conn.private.slack_user,
-        team: conn.private.slack_team
+        user: Dict.get(conn.private, :slack_user),
+        team: Dict.get(conn.private, :slack_team)
       }
     }
   end
@@ -189,19 +217,26 @@ defmodule Ueberauth.Strategy.Slack do
 
   # Given the auth and token we can now fetch the user.
   defp fetch_user(conn, token) do
-    auth = conn.private.slack_auth
+    scopes = (token.other_params["scope"] || "")
+    |> String.split(",")
 
-    case OAuth2.AccessToken.post(token, "/users.info", [token: token.access_token, user: auth["user_id"]], [{"Content-Type", "application/x-www-form-urlencoded"}]) do
-      { :ok, %OAuth2.Response{status_code: 401, body: _body}} ->
-        set_errors!(conn, [error("token", "unauthorized")])
-      { :ok, %OAuth2.Response{status_code: status_code, body: user} } when status_code in 200..399 ->
-        if user["ok"] do
-          put_private(conn, :slack_user, user["user"])
-        else
-          set_errors!(conn, [error(user["error"], user["error"])])
+    case "users:read" in scopes do
+      false -> conn
+      true  ->
+        auth = conn.private.slack_auth
+
+        case OAuth2.AccessToken.post(token, "/users.info", [token: token.access_token, user: auth["user_id"]], [{"Content-Type", "application/x-www-form-urlencoded"}]) do
+          { :ok, %OAuth2.Response{status_code: 401, body: _body}} ->
+            set_errors!(conn, [error("token", "unauthorized")])
+          { :ok, %OAuth2.Response{status_code: status_code, body: user} } when status_code in 200..399 ->
+            if user["ok"] do
+              put_private(conn, :slack_user, user["user"])
+            else
+              set_errors!(conn, [error(user["error"], user["error"])])
+            end
+          { :error, %OAuth2.Error{reason: reason} } ->
+            set_errors!(conn, [error("OAuth2", reason)])
         end
-      { :error, %OAuth2.Error{reason: reason} } ->
-        set_errors!(conn, [error("OAuth2", reason)])
     end
   end
 
